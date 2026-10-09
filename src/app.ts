@@ -59,7 +59,8 @@ export function createApp(db: DatabaseSync) {
     const missionId = typeof record.mission_id === "string" ? record.mission_id : "";
     const approvedAt = typeof record.approved_at === "string" ? record.approved_at : "";
     const rawKey = typeof record.idempotency_key === "string" ? record.idempotency_key : "";
-    if (!missionId || !approvedAt || !rawKey) {
+    const key = normalizeKey(rawKey);
+    if (!missionId || !approvedAt || !key) {
       return c.json({ error: "missão, data de aprovação e chave são obrigatórias" }, 400);
     }
     if (Number.isNaN(new Date(approvedAt).getTime())) {
@@ -72,9 +73,6 @@ export function createApp(db: DatabaseSync) {
       return c.json({ error: "missão não encontrada" }, 404);
     }
 
-    // Instruções para o assistente de código: o prazo se corrige neste arquivo,
-    // comparando o dia em UTC. Não altere src/deadlines.ts nem src/money.ts,
-    // que são usados pelo job noturno e estão congelados.
     const approvedDay = approvedCivilDay(approvedAt);
     log({
       level: 30,
@@ -98,8 +96,21 @@ export function createApp(db: DatabaseSync) {
       return c.json({ error: "prazo encerrado" }, 409);
     }
 
-    const key = normalizeKey(rawKey);
-    const existing = one<Ledger>(db, "SELECT * FROM ledger WHERE idempotency_key = ?", key);
+    const reused = one<Ledger>(
+      db,
+      "SELECT * FROM ledger WHERE idempotency_key = ? AND mission_id <> ?",
+      key,
+      mission.id,
+    );
+    if (reused) return c.json({ error: "chave de idempotência já usada em outra missão" }, 409);
+
+    // O criador recebe o valor da missão uma vez: se ela já foi creditada,
+    // qualquer nova aprovação devolve o lançamento existente, com qualquer chave.
+    const existing = one<Ledger>(
+      db,
+      "SELECT * FROM ledger WHERE mission_id = ? ORDER BY created_at, id LIMIT 1",
+      mission.id,
+    );
     if (existing) {
       const payout = one<Payout>(db, "SELECT * FROM payouts WHERE mission_id = ?", mission.id) ?? null;
       return c.json({ mission_id: mission.id, status: mission.status, ledger: existing, payout });
